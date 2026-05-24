@@ -221,25 +221,98 @@ class MercariBot:
         )
 
 
+def tg_api(method: str, **payload):
+    """Хелпер: вызывает Telegram Bot API и логирует ошибки целиком (а не молча глотает)."""
+    url = f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/{method}"
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        if not resp.ok:
+            print(f"[tg {method}] HTTP {resp.status_code}: {resp.text[:300]}")
+        else:
+            data = resp.json()
+            if not data.get("ok"):
+                print(f"[tg {method}] API error: {data}")
+        return resp
+    except Exception as e:
+        print(f"[tg {method}] exception: {e}")
+        return None
+
+
+def self_test():
+    """Проверка токена + рассылка стартового сообщения. Если эти шаги падают —
+    дальше нет смысла запускать парсер."""
+    print("→ Проверяю токен через getMe…")
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/getMe", timeout=15
+        ).json()
+    except Exception as e:
+        print(f"❌ Не удалось дозвониться до api.telegram.org: {e}")
+        return False
+    if not r.get("ok"):
+        print(f"❌ Токен невалиден или отозван: {r}")
+        return False
+    me = r.get("result", {})
+    print(f"✅ Бот: @{me.get('username')} (id={me.get('id')})")
+
+    # Стартовое сообщение в каждый чат — если не дойдёт, увидим почему.
+    ok_any = False
+    for chat_id in CONFIG["CHAT_IDS"]:
+        resp = tg_api(
+            "sendMessage",
+            chat_id=chat_id,
+            text=f"🚀 Mercari Bot перезапущен. /ping — проверить связь.",
+        )
+        if resp is not None and resp.ok:
+            ok_any = True
+            print(f"   ✓ стартовое сообщение отправлено в {chat_id}")
+    if not ok_any:
+        print("⚠ Ни в один CHAT_ID не удалось отправить стартовое сообщение.")
+        print("   Возможные причины: 1) пользователь не написал боту /start;")
+        print("                     2) chat_id указан неверно;")
+        print("                     3) бот не добавлен в группу/канал.")
+    return True
+
+
 if __name__ == "__main__":
     bot = MercariBot()
+
+    if not self_test():
+        print("Останавливаюсь. Исправьте токен и перезапустите.")
+        raise SystemExit(1)
+
     threading.Thread(target=bot.run_parser, daemon=True).start()
     print("🚀 Mercari Bot запущен!")
-    print("Команды:\n   /price     — меню с кнопками\n   /maxprice 25000 — установить цену\n   /reset     — очистить базу")
+    print("Команды:\n   /ping      — проверить связь\n   /price     — меню с кнопками\n   /maxprice 25000 — установить цену\n   /reset     — очистить базу")
 
     offset = 0
     while True:
         try:
             r = requests.get(
-                f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/getUpdates?offset={offset}&timeout=10"
+                f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/getUpdates?offset={offset}&timeout=10",
+                timeout=20,
             ).json()
+            if not r.get("ok"):
+                # Самая частая причина «бот не отвечает на команды»: 409 Conflict —
+                # другой инстанс одновременно опрашивает getUpdates.
+                print(f"[getUpdates] API error: {r}")
+                time.sleep(5)
+                continue
             if r.get("ok"):
                 for u in r.get("result", []):
                     offset = u["update_id"] + 1
                     if "message" in u:
                         text = u["message"].get("text", "").strip()
                         chat_id = u["message"]["chat"]["id"]
-                        if text == "/price":
+                        print(f"[update] chat_id={chat_id} text={text!r}")
+                        if text in ("/start", "/ping"):
+                            tg_api(
+                                "sendMessage",
+                                chat_id=chat_id,
+                                text=f"🏓 Pong! Ваш chat_id: <code>{chat_id}</code>",
+                                parse_mode="HTML",
+                            )
+                        elif text == "/price":
                             bot.send_price_menu(chat_id)
                         elif text.startswith("/maxprice"):
                             try:
@@ -285,5 +358,8 @@ if __name__ == "__main__":
                                 f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/sendMessage",
                                 json={"chat_id": chat_id, "text": text},
                             )
-        except Exception:
+        except Exception as e:
+            # Раньше тут было голое except: pass — из-за этого «бот молчит» было невозможно
+            # диагностировать. Теперь видно сетевые/JSON-ошибки.
+            print(f"[getUpdates] exception: {e}")
             time.sleep(5)
