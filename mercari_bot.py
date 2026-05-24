@@ -1,10 +1,51 @@
 import time
 import sqlite3
-import requests
 import re
 import os
+import sys
+import logging
 import threading
-from playwright.sync_api import sync_playwright
+import traceback
+
+# === Логирование в файл + консоль (чтобы при падении на Windows было что почитать) ===
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mercari_bot.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+# Подменяем print, чтобы все сообщения уходили и в файл, и в консоль.
+print = lambda *a, **kw: logging.info(" ".join(str(x) for x in a))  # noqa: E731
+
+
+def _hold_console(code: int = 0):
+    """Не даём окну закрыться сразу: ждём Enter перед выходом."""
+    try:
+        # Только если запущено в интерактивной консоли (двойной клик на Windows).
+        if sys.stdin and sys.stdin.isatty():
+            input("\n— Нажмите Enter, чтобы закрыть окно —")
+    except Exception:
+        pass
+    sys.exit(code)
+
+
+# Ловим импорты по одному — чтобы при отсутствии модуля выдать понятную инструкцию.
+try:
+    import requests  # noqa: E402
+except ImportError:
+    print("❌ Не установлен модуль 'requests'. Установите:  pip install requests")
+    _hold_console(1)
+
+try:
+    from playwright.sync_api import sync_playwright  # noqa: E402
+except ImportError:
+    print("❌ Не установлен модуль 'playwright'. Установите:")
+    print("   pip install playwright")
+    print("   python -m playwright install chromium")
+    _hold_console(1)
 
 # === НАСТРОЙКИ ===
 CONFIG = {
@@ -274,12 +315,12 @@ def self_test():
     return True
 
 
-if __name__ == "__main__":
+def main():
     bot = MercariBot()
 
     if not self_test():
-        print("Останавливаюсь. Исправьте токен и перезапустите.")
-        raise SystemExit(1)
+        print("Останавливаюсь. Исправьте токен/сеть и перезапустите.")
+        _hold_console(1)
 
     threading.Thread(target=bot.run_parser, daemon=True).start()
     print("🚀 Mercari Bot запущен!")
@@ -363,3 +404,18 @@ if __name__ == "__main__":
             # диагностировать. Теперь видно сетевые/JSON-ошибки.
             print(f"[getUpdates] exception: {e}")
             time.sleep(5)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nОстановлено пользователем (Ctrl+C).")
+        _hold_console(0)
+    except Exception:
+        # Любая непойманная ошибка пишется в лог и в консоль с трейсбэком,
+        # окно не закрывается до Enter.
+        print("❌ Необработанное исключение в main():")
+        print(traceback.format_exc())
+        print(f"Полный лог: {LOG_FILE}")
+        _hold_console(1)
