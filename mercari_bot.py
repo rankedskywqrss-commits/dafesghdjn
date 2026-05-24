@@ -47,6 +47,24 @@ except ImportError:
     print("   python -m playwright install chromium")
     _hold_console(1)
 
+# Если у пользователя в env прописан SOCKS-прокси, но PySocks не установлен —
+# requests падает с "Missing dependencies for SOCKS support". Предупредим заранее.
+_socks_proxy = next(
+    (os.environ.get(k) for k in
+     ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+      "https_proxy", "http_proxy", "all_proxy")
+     if os.environ.get(k) and "socks" in os.environ.get(k, "").lower()),
+    None,
+)
+if _socks_proxy:
+    try:
+        import socks  # noqa: F401  PySocks
+    except ImportError:
+        print(f"⚠ Обнаружен SOCKS-прокси в окружении: {_socks_proxy}")
+        print("   Но не установлен PySocks. Установите:")
+        print('   pip install "requests[socks]"')
+        _hold_console(1)
+
 # === НАСТРОЙКИ ===
 CONFIG = {
     "TG_TOKEN": "8823354327:AAGk-w0NZ8tj57flOCCTdthwdZi0vEFI-2o",
@@ -279,6 +297,27 @@ def tg_api(method: str, **payload):
         return None
 
 
+def _diagnose_network_error(err: Exception):
+    """Подсказки по самым частым сетевым ошибкам."""
+    msg = str(err)
+    if "SOCKS" in msg or "socks" in msg:
+        proxies = {
+            k: os.environ.get(k)
+            for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                      "http_proxy", "https_proxy", "all_proxy")
+            if os.environ.get(k)
+        }
+        print("   Похоже, в системе настроен SOCKS-прокси, а у requests нет PySocks.")
+        if proxies:
+            print(f"   Найдены переменные окружения: {proxies}")
+        print("   Исправление (одно из двух):")
+        print("     1) Установить поддержку SOCKS:  pip install \"requests[socks]\"")
+        print("     2) Снять прокси из окружения и работать напрямую.")
+    elif "Max retries" in msg or "ConnectionError" in msg or "NameResolution" in msg:
+        print("   Нет доступа к api.telegram.org. Проверьте интернет / VPN.")
+        print("   В РФ Telegram API часто требует прокси или VPN.")
+
+
 def self_test():
     """Проверка токена + рассылка стартового сообщения. Если эти шаги падают —
     дальше нет смысла запускать парсер."""
@@ -289,6 +328,7 @@ def self_test():
         ).json()
     except Exception as e:
         print(f"❌ Не удалось дозвониться до api.telegram.org: {e}")
+        _diagnose_network_error(e)
         return False
     if not r.get("ok"):
         print(f"❌ Токен невалиден или отозван: {r}")
