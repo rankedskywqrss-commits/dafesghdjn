@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 
 # === НАСТРОЙКИ ===
 CONFIG = {
-    "TG_TOKEN": "8626886513:AAHsIw586Jcw0D4DCClhb3fKCgoQwAjZ2eE",
+    "TG_TOKEN": "8823354327:AAGk-w0NZ8tj57flOCCTdthwdZi0vEFI-2o",
     "CHAT_IDS": ["711777770", "6368693741"],
     "CHECK_INTERVAL": 120,
     # Курс японской иены к рублю. Уточняйте актуальное значение.
@@ -57,18 +57,39 @@ class MercariBot:
         )
         for chat_id in CONFIG["CHAT_IDS"]:
             try:
-                requests.post(
-                    f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/sendPhoto",
-                    json={
-                        "chat_id": chat_id,
-                        "caption": text,
-                        "parse_mode": "HTML",
-                        "photo": photo_url,
-                    },
-                    timeout=15,
-                )
-            except Exception:
-                pass
+                if photo_url:
+                    resp = requests.post(
+                        f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/sendPhoto",
+                        json={
+                            "chat_id": chat_id,
+                            "caption": text,
+                            "parse_mode": "HTML",
+                            "photo": photo_url,
+                        },
+                        timeout=15,
+                    )
+                else:
+                    resp = None
+
+                # Если фото не удалось отправить (например, Telegram не смог скачать картинку),
+                # шлём обычным сообщением, чтобы юзер хотя бы получил уведомление.
+                if resp is None or not resp.ok:
+                    if resp is not None:
+                        print(f"   [tg sendPhoto {chat_id}] {resp.status_code} {resp.text[:200]}")
+                    fallback = requests.post(
+                        f"https://api.telegram.org/bot{CONFIG['TG_TOKEN']}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": text,
+                            "parse_mode": "HTML",
+                            "disable_web_page_preview": False,
+                        },
+                        timeout=15,
+                    )
+                    if not fallback.ok:
+                        print(f"   [tg sendMessage {chat_id}] {fallback.status_code} {fallback.text[:200]}")
+            except Exception as e:
+                print(f"   [tg err {chat_id}] {e}")
 
     def reset_database(self):
         self.cursor.execute('DELETE FROM items')
@@ -129,21 +150,33 @@ class MercariBot:
                     title = (img.get_attribute('alt') or "Без названия").replace('Thumbnail of ', '').strip() if img else "Без названия"
                     img_url = img.get_attribute('src') if img else ""
 
-                    # Сначала пробуем специальный селектор цены, потом весь текст карточки
-                    price_el = (
-                        item.query_selector('[data-testid="price"]')
-                        or item.query_selector('[class*="price" i]')
-                        or item.query_selector('span:has-text("¥")')
-                    )
-                    price_text = price_el.inner_text() if price_el else item.inner_text()
-                    yen = self.extract_yen_price(price_text)
+                    # Несколько источников цены: спец-селекторы → aria-label → весь текст карточки
+                    yen = 0
+                    for sel in (
+                        '[data-testid="price"]',
+                        '[class*="price" i]',
+                        'span:has-text("¥")',
+                        'span:has-text("円")',
+                    ):
+                        el = item.query_selector(sel)
+                        if el:
+                            yen = self.extract_yen_price(el.inner_text())
+                            if yen > 0:
+                                break
 
                     if yen <= 0:
-                        print(f"   ⚠ Не удалось распарсить цену для {item_id}: {price_text[:80]!r}")
-                        continue
+                        aria = item.get_attribute('aria-label') or ''
+                        yen = self.extract_yen_price(aria)
 
-                    rub = round(yen * CONFIG["YEN_TO_RUB"])
-                    price_str = f"{rub:,} ₽ <i>(¥{yen:,})</i>"
+                    if yen <= 0:
+                        yen = self.extract_yen_price(item.inner_text())
+
+                    if yen > 0:
+                        rub = round(yen * CONFIG["YEN_TO_RUB"])
+                        price_str = f"{rub:,} ₽ <i>(¥{yen:,})</i>"
+                    else:
+                        print(f"   ⚠ Цена не найдена для {item_id}, шлю с пометкой")
+                        price_str = "не определена (см. на сайте)"
 
                     full_link = "https://jp.mercari.com" + href
                     self.send_telegram(title, price_str, full_link, img_url, keyword)
